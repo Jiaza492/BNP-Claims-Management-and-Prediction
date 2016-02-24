@@ -1,0 +1,208 @@
+---
+title: "BNP Claims Management"
+author: "Ziang Jia"
+date: "February 20, 2016"
+output: html_document
+runtime: shiny
+---
+
+## Data Cleaning and Imputation
+
+Given the train set and test set. Here are the summaries of these two sets:
+
+Set       Numbers   Missing   0:1(Target)
+-------   --------  --------  ---------------
+Train     114321    84.47%    0.31
+Test      114393    84.57%    _
+
+First, since porpotion of missing values are so large, we are going to impute the missing values in data set. For numerical variables, we will apply EM algorithm, making their distribution approximately normal; for categorical value, we randomly set it to one of their levels following the levels stratification.
+
+```{r,echo=FALSE}
+# this part takes long time so please refer to server.R
+#setwd("~/Documents/KSMC/")
+train_1 = read.csv("train_1.csv",header = TRUE)
+train_1 = train_1[,-1]
+train_1$target = as.factor(train_1$target)
+# factorize some numerical variables
+train_1$v38 = as.factor(train_1$v38)
+train_1$v62 = as.factor(train_1$v62)
+train_1$v72 = as.factor(train_1$v72)
+train_1$v129 = as.factor(train_1$v129)
+
+
+```
+
+Here we generate 5 imputation for both train set and test set and choose the best one for each set. The implementation function is Amelia Package in R. Amelia provides data imputation prcedure to repair large scale of missing values, refer to server.R for details.
+
+
+## Features Description
+
+Some features just have several distinct integer value so we should also treat the as categorical variables, such as: v38, v62, v72, v129. 
+
+Categorical Variables are:
+
+```{r,echo=FALSE}
+dummy = c(4,23,25,31,32,39,48,53,57,63,67,72,73,75,76,80,92,108,111,113,114,126,130)# in test
+dummy_var = colnames(train_1[,-1])[dummy]
+summary(train_1[,dummy_var])
+```
+
+Notice there are some categorical features have too many levels: V23, V56, V113, V125. We would find a way to reduce them.
+
+
+## Feature reduction
+
+This step is optional and depends on model we choose. There are some categorical features have too many levels: V23, V56, V113, V125. If we decided to use RandomForest Package in R, the limited numbers of levels is 32 for each categorical variable. 
+
+However, we could transform categorical levels into dummy variables contains only 0 or 1 for each level. In this way, we reduce levels but increase the number of variables in times. In this case, we could apply regularized logistic model and conduct variables selection among those dummy variables.
+
+
+## EDA
+
+The dependency between numerical variable and categorical variables can be roughly setected by stock graph. The distribution of numerical variable among a specific categorical levels are shown as in boxplot.
+```{r,echo=FALSE}
+library(ggplot2)
+# library(reshape2)
+
+v_names = colnames(train_1)
+numerical = v_names[c(3:133)[-(dummy+1)]]
+
+inputPanel(
+  selectInput("bar_selection", label = "Dummy Variable",
+              choices = dummy_var, selected = "v24"),
+  
+  selectInput("box_selection", label = "Numeric Variable",
+              choices = numerical, selected = "v2")
+)
+
+renderPlot({
+  qplot(factor(train_1[,input$bar_selection]), data = train_1, gemo = "bar", fill = factor(target),xlab = input$bar_selection)
+})
+
+renderPlot({
+   boxplot(train_1[,input$box_selection]~train_1[,input$bar_selection],ylab = input$box_selection,col="coral1")
+})
+
+```
+
+
+## K-NN Model
+
+Before we conducting any complicate model, we sre going to try K-NN directly to see how the result is and where we could apply improvement.
+
+```{r,echo=FALSE}
+loss = read.csv("knn_loss.csv",header = TRUE)
+loss = loss[-1,-1]
+renderPlot({
+  ggplot(loss,aes(x=k,y=log_loss,color="coral1"))+geom_line()+xlab("K")+ylab("Log_loss")
+  
+})
+```
+
+As we could see above, the best K around 180 gives lowest Log-loss at 0.5379. This result is no very good since we use almost all 507 variables so there is risk of overfitting regardless how optimized our number of folder is. To reduce loss, we have to reduce variance. 
+
+## RandomForest Model
+
+A good way to reduce variance is apply ensemble methods such as Bagging. Among all ensemble method, randomForest is the most popular one so we are going to train a randomForest model to see whether there is improvement or not.
+
+Since this is a two-class classification problem, we should use criteria AUC which balance percision and recall of the result.
+
+```{r,echo=FALSE}
+result_mat = read.csv("result_rf_dummy.csv",header=TRUE)
+result_mat = result_mat[,-1]
+library("reshape2")
+library("ROCR")
+
+melt_it = function(measure,result_mat){
+  if(measure == "OOB"){
+    return(melt(result_mat[,c("n_tree","train_OOB","test_OOB")], id.vars="n_tree",variable.name = "Set"))
+  }else if(measure == "Log-Loss"){
+    return(melt(result_mat[,c("n_tree","train_LOSS","test_LOSS")],id.vars="n_tree",variable.name="Set"))
+  }
+  
+}
+
+inputPanel(
+  selectInput("measure", label = "Measurement choose:", choices = c("Log-Loss"),selected = "Log-loss")
+)
+
+renderPlot({
+  ggplot(aes(x=n_tree,y = value,group=Set,colour = Set),data=melt_it(measure = input$measure, result_mat = result_mat))+geom_line()+ylab(input$measure)
+
+})
+
+```
+
+Below is ROC curve of model K-NN and RandomForest. We could see AUC of randomForest is obviously larger than that of K-NN, indicates an improvement on predictive percision.
+
+```{r,echo=FALSE}
+dd = readRDS("roc", refhook = NULL)
+renderPlot({
+  plot(dd[,1]$perf_ROC,col = "cyan1", lwd = 2)
+  lines(dd[,7]$perf_ROC@x.values[[1]], dd[,7]$perf_ROC@y.values[[1]],col = "coral1",lwd = 2)
+  legend("topleft",legend=c("K-NN","RandomForest"),col = c("cyan1","coral1"),lty = 1,lwd = 2)
+})
+
+```
+
+
+## Variable Selection
+
+Before doing variable selection, we know scatter plots can give us a great idea of what we are dealing with: it can be interesting to see how much one variable is affected by another. In other words, we want to see if there is any correlation between two variables and the response.
+
+```{r,echo=FALSE}
+inputPanel(
+  selectInput("bar1", label = "Dimension 1",
+              choices = numerical, selected = "v4"),
+  
+  selectInput("bar2", label = "Dimension 2",
+              choices = numerical, selected = "v2")
+)
+
+to_plot = function(x_name,dt){
+    pp = dt[,x_name]
+    return(pp)
+}
+
+renderPlot({
+  qplot(x = to_plot(input$bar1, train_1),y = to_plot(input$bar2, train_1), data = train_1, fill = target, color = target, geom = "point",xlab = input$bar1, ylab = input$bar2)
+
+})
+
+
+```
+
+Roughly observation is that: v9,v20,v21,v24,v28,v31,v38,v44,v47,v50,v56,v59,v78,v82, v98,v109,v110,v112,v129,v131 are strong correlated with response variable. We are going to conduct further variable selection to clearify it.
+
+Once we transform all categorical features into dummy variables, we could now conduct a variables selection procedure to reduce the variance of model. 
+
+Procedure LASSO will help logistic regression shrink some varaibles down to zero which significantly reduce variance of regression by sacrificing a little bias.
+
+Since we can apply a two-class regularized logistic regression, so the area under the ROC curve (AUC) should be our best criteria for selecting variable subset. It is consistent with F1 score based on averaging percision and recall.
+
+```{r,echo=FALSE}
+# plot fie_log here
+fit_log = readRDS("fit_log", refhook = NULL)
+library(glmnet)
+renderPlot({
+  plot(fit_log)
+})
+```
+
+The best lambda is set at where the model achieves highest AUC(lowesr MSE). By setting the best lambda, the Log-Loss is around 0.47043, higher than randomforest benchmark(See server.R for randomforest procedure). The variables selected are:
+
+```{r,echo=FALSE}
+var_coef = read.csv("coef_log.csv",header = TRUE)
+colnames(var_coef) = c("Name","Coef")
+renderDataTable(var_coef)
+```
+
+The number of significant variables is more than we observed from graph directly but roughly consistent. There might be some multicollineariy among variables and some model diagnosis need to be done furthermore. 
+
+## Conclusion
+
+To achieve a lower log-loss, further analysis should be done. 
+
+One important thing is, there might still be seriously correlation between some variables. So our next step is going to be features correlation study.
+
+
